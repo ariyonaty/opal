@@ -1,7 +1,7 @@
 # BUILD STAGE ---------------------------------------
 # split this stage to save time and reduce image size
 # ---------------------------------------------------
-FROM python:3.10-bookworm AS build-stage
+FROM python:3.10-alpine AS build-stage
 # from now on, work in the /app directory
 WORKDIR /app/
 # Layer dependency install (for caching)
@@ -10,7 +10,9 @@ COPY ./packages/opal-common/requires.txt ./common_requires.txt
 COPY ./packages/opal-client/requires.txt ./client_requires.txt
 COPY ./packages/opal-server/requires.txt ./server_requires.txt
 # install python deps
-RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r ./base_requires.txt -r ./common_requires.txt -r ./client_requires.txt -r ./server_requires.txt
+RUN apk add gcc python3-dev musl-dev zlib-dev linux-headers && \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r ./base_requires.txt -r ./common_requires.txt -r ./client_requires.txt -r ./server_requires.txt
 
 # CEDAR AGENT BUILD STAGE ---------------------------
 # split this stage to save time and reduce image size
@@ -22,24 +24,25 @@ RUN CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo build --release
 
 # COMMON IMAGE --------------------------------------
 # ---------------------------------------------------
-FROM python:3.10-slim-bookworm AS common
+FROM python:3.10-alpine AS common
 
 # copy libraries from build stage (This won't copy redundant libraries we used in build-stage)
 # also remove the default python site-packages that has older versions of packages that won't be overridden
 RUN rm -r /usr/local/lib/python3.10/site-packages
 COPY --from=build-stage /usr/local /usr/local
 
-# Add non-root user (with home dir at /opal)
-RUN useradd -m -b / -s /bin/bash opal
+# Add non-root user (with home dir)
 WORKDIR /opal
+RUN addgroup -g 1000 -S opal && \
+    adduser -u 1000 -S -s /bin/bash -G opal opal && \
+    chown -R 1000:1000 /opal
 
 # copy wait-for script (create link at old path to maintain backward compatibility)
 COPY scripts/wait-for.sh .
 RUN chmod +x ./wait-for.sh
 RUN ln -s /opal/wait-for.sh /usr/wait-for.sh
 
-# netcat (nc) is used by the wait-for.sh script
-RUN apt-get update && apt-get install -y netcat-traditional jq && apt-get clean
+RUN apk add --no-cache jq bash
 
 # copy startup script (create link at old path to maintain backward compatibility)
 COPY ./scripts/start.sh .
@@ -80,9 +83,10 @@ ENV OPAL_INLINE_OPA_ENABLED=false
 
 # expose opal client port
 EXPOSE 7000
-USER opal
 
-RUN mkdir -p /opal/backup
+RUN mkdir -p /opal/backup && \
+    chown -R 1000:1000 /opal
+USER opal
 VOLUME /opal/backup
 
 
@@ -144,8 +148,7 @@ USER opal
 # ---------------------------------------------------
 FROM common AS server
 
-RUN apt-get update && apt-get install -y openssh-client git && apt-get clean
-RUN git config --global core.symlinks false # Mitigate CVE-2024-32002
+RUN apk add openssh-client git
 
 USER opal
 
